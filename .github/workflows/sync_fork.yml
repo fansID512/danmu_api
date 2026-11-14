@@ -18,27 +18,51 @@ jobs:
             - name: Checkout target repo
               uses: actions/checkout@v5
               with:
-                token: ${{ secrets.GITHUB_TOKEN }}
+                  fetch-depth: 0
+                  token: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Sync Upstream
-              uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
-              with:
-                  target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-                  upstream_sync_repo: huangxd-/danmu_api
-                  upstream_sync_branch: main
-                  target_sync_branch: main
-                  test_mode: false
+            # GITHUB_TOKEN 是 GitHub App token，没有 workflows 权限，
+            # 一旦上游改动 .github/workflows/* 就会 push 被拒（refusing to allow a GitHub App
+            # to create or update workflow ... without workflows permission）。
+            # 所以同步时保留本仓库自己的 workflow 文件，其余代码照常跟随上游。
+            - name: Sync Upstream (skip workflow files)
+              run: |
+                  set -euo pipefail
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git remote add upstream https://github.com/huangxd-/danmu_api.git 2>/dev/null || true
+                  git fetch --no-tags upstream main
+                  git merge --no-commit --no-ff upstream/main || true
 
-            - name: Check for new commits
-              if: success()
-              run: echo "Sync completed successfully"
+                  # 冲突只在 workflow 文件上时才自动消解（本地优先）
+                  if [ -n "$(git ls-files -u | awk '{print $4}' | grep -v '^\.github/workflows/' || true)" ]; then
+                      echo "[Error] 非 workflow 文件存在冲突，需要人工处理："
+                      git ls-files -u | awk '{print $4}' | sort -u
+                      git merge --abort || true
+                      exit 1
+                  fi
+
+                  # 保留本地 workflow 文件（含已禁用的 docker-image.yml）
+                  git checkout origin/main -- .github/workflows
+                  git add -A
+
+                  if git diff --cached --quiet; then
+                      echo "已是最新，无需同步"
+                      exit 0
+                  fi
+
+                  git commit -m "chore: sync with upstream $(date -u +%Y-%m-%d)"
+                  for i in 1 2 3; do
+                      git push origin HEAD:main && exit 0
+                      echo "push 失败，第 $i 次重试…"
+                      sleep 5
+                  done
+                  exit 1
 
             - name: Check for Failure
               if: failure()
               run: |
                   echo "[Error] Sync failed. This might be due to:"
-                  echo "1. Changes in the upstream workflow file"
-                  echo "2. Merge conflicts that need manual resolution"
-                  echo "3. Network issues"
-                  echo "Please check the logs and consider manual sync if needed."
+                  echo "1. 上游改动了 .github/workflows 之外的同名文件导致冲突"
+                  echo "2. Network issues"
                   exit 1
