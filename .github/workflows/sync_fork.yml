@@ -32,17 +32,26 @@ jobs:
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
                   git remote add upstream https://github.com/huangxd-/danmu_api.git 2>/dev/null || true
                   git fetch --no-tags upstream main
-                  git merge --no-commit --no-ff upstream/main || true
 
-                  # 冲突只在 workflow 文件上时才自动消解（本地优先）
-                  if [ -n "$(git ls-files -u | awk '{print $4}' | grep -v '^\.github/workflows/' || true)" ]; then
-                      echo "[Error] 非 workflow 文件存在冲突，需要人工处理："
-                      git ls-files -u | awk '{print $4}' | sort -u
-                      git merge --abort || true
-                      exit 1
+                  merge_ok=1
+                  git merge --no-commit --no-ff upstream/main || merge_ok=0
+
+                  if [ "$merge_ok" -eq 0 ]; then
+                      if [ -z "$(git rev-parse -q --verify MERGE_HEAD || true)" ]; then
+                          echo "[Error] 与上游 merge 未启动（可能是历史不相关或 fetch 异常）"
+                          exit 1
+                      fi
+                      bad=$(git ls-files -u | awk '{print $4}' | sort -u | grep -v '^\.github/workflows/' || true)
+                      if [ -n "$bad" ]; then
+                          echo "[Error] 以下非 workflow 文件存在冲突，需要人工处理："
+                          echo "$bad"
+                          git merge --abort || true
+                          exit 1
+                      fi
+                      echo "仅 workflow 文件冲突，按本地版本消解"
                   fi
 
-                  # 保留本地 workflow 文件（含已禁用的 docker-image.yml）
+                  # 保留本地 workflow 文件（含已手动禁用的 docker-image.yml）
                   git checkout origin/main -- .github/workflows
                   git add -A
 
@@ -53,7 +62,10 @@ jobs:
 
                   git commit -m "chore: sync with upstream $(date -u +%Y-%m-%d)"
                   for i in 1 2 3; do
-                      git push origin HEAD:main && exit 0
+                      if git push origin HEAD:main; then
+                          echo "同步完成"
+                          exit 0
+                      fi
                       echo "push 失败，第 $i 次重试…"
                       sleep 5
                   done
